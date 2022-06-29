@@ -98,6 +98,7 @@ from . import (
     nystromformer,
     openai,
     opt,
+    owlvit,
     pegasus,
     perceiver,
     phobert,
