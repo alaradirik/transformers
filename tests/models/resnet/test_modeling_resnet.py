@@ -22,8 +22,8 @@ from transformers import ResNetConfig
 from transformers.testing_utils import require_torch, require_vision, slow, torch_device
 from transformers.utils import cached_property, is_torch_available, is_vision_available
 
-from ...test_configuration_common import ConfigTester
-from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
+from ..test_configuration_common import ConfigTester
+from ..test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
 
 
 if is_torch_available():
@@ -147,10 +147,6 @@ class ResNetModelTest(ModelTesterMixin, unittest.TestCase):
     def create_and_test_config_common_properties(self):
         return
 
-    @unittest.skip(reason="ResNet does not output attentions")
-    def test_attention_outputs(self):
-        pass
-
     @unittest.skip(reason="ResNet does not use inputs_embeds")
     def test_inputs_embeds(self):
         pass
@@ -255,7 +251,7 @@ class ResNetModelIntegrationTest(unittest.TestCase):
 
     @slow
     def test_inference_image_classification_head(self):
-        model = ResNetForImageClassification.from_pretrained(RESNET_PRETRAINED_MODEL_ARCHIVE_LIST[0]).to(torch_device)
+        model = ResNetForImageClassification.from_pretrained("microsoft/resnet-50").to(torch_device)
 
         feature_extractor = self.default_feature_extractor
         image = prepare_img()
@@ -270,5 +266,26 @@ class ResNetModelIntegrationTest(unittest.TestCase):
         self.assertEqual(outputs.logits.shape, expected_shape)
 
         expected_slice = torch.tensor([-11.1069, -9.7877, -8.3777]).to(torch_device)
+
+        self.assertTrue(torch.allclose(outputs.logits[0, :3], expected_slice, atol=1e-4))
+
+    @slow
+    def test_inference_image_classification_head_basic_layer(self):
+        # resnet-34 uses ResNetBasicLayer instead of ResNetBottleneckLayer
+        model = ResNetForImageClassification.from_pretrained("microsoft/resnet-34").to(torch_device)
+
+        feature_extractor = self.default_feature_extractor
+        image = prepare_img()
+        inputs = feature_extractor(images=image, return_tensors="pt").to(torch_device)
+
+        # forward pass
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+        # verify the logits
+        expected_shape = torch.Size((1, 1000))
+        self.assertEqual(outputs.logits.shape, expected_shape)
+
+        expected_slice = torch.tensor([-0.5110, 0.3185, -0.3791]).to(torch_device)
 
         self.assertTrue(torch.allclose(outputs.logits[0, :3], expected_slice, atol=1e-4))

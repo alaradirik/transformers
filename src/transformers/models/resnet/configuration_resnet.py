@@ -14,13 +14,7 @@
 # limitations under the License.
 """ ResNet model configuration"""
 
-from collections import OrderedDict
-from typing import Mapping
-
-from packaging import version
-
 from ...configuration_utils import PretrainedConfig
-from ...onnx import OnnxConfig
 from ...utils import logging
 
 
@@ -37,10 +31,8 @@ class ResNetConfig(PretrainedConfig):
     ResNet model according to the specified arguments, defining the model architecture. Instantiating a configuration
     with the defaults will yield a similar configuration to that of the ResNet
     [microsoft/resnet-50](https://huggingface.co/microsoft/resnet-50) architecture.
-
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
-
     Args:
         num_channels (`int`, *optional*, defaults to 3):
             The number of input channels.
@@ -58,11 +50,11 @@ class ResNetConfig(PretrainedConfig):
             are supported.
         downsample_in_first_stage (`bool`, *optional*, defaults to `False`):
             If `True`, the first stage will downsample the inputs using a `stride` of 2.
-
+        replace_stride_with_dilation (`bool`, *optional*, defaults to `[False, False, False]`):
+            Whether or not to replace the 2x2 stride with a dilated convolution in each of the last 3 stages.
     Example:
     ```python
     >>> from transformers import ResNetConfig, ResNetModel
-
     >>> # Initializing a ResNet resnet-50 style configuration
     >>> configuration = ResNetConfig()
     >>> # Initializing a model from the resnet-50 style configuration
@@ -83,11 +75,17 @@ class ResNetConfig(PretrainedConfig):
         layer_type="bottleneck",
         hidden_act="relu",
         downsample_in_first_stage=False,
+        replace_stride_with_dilation=[False, False, False],
         **kwargs
     ):
         super().__init__(**kwargs)
         if layer_type not in self.layer_types:
             raise ValueError(f"layer_type={layer_type} is not one of {','.join(self.layer_types)}")
+        if len(replace_stride_with_dilation) != 3:
+            raise ValueError(
+                "replace_stride_with_dilation should be" f"a 3-element tuple, got {replace_stride_with_dilation}"
+            )
+
         self.num_channels = num_channels
         self.embedding_size = embedding_size
         self.hidden_sizes = hidden_sizes
@@ -95,20 +93,4 @@ class ResNetConfig(PretrainedConfig):
         self.layer_type = layer_type
         self.hidden_act = hidden_act
         self.downsample_in_first_stage = downsample_in_first_stage
-
-
-class ResNetOnnxConfig(OnnxConfig):
-
-    torch_onnx_minimum_version = version.parse("1.11")
-
-    @property
-    def inputs(self) -> Mapping[str, Mapping[int, str]]:
-        return OrderedDict(
-            [
-                ("pixel_values", {0: "batch", 1: "sequence"}),
-            ]
-        )
-
-    @property
-    def atol_for_validation(self) -> float:
-        return 1e-3
+        self.replace_stride_with_dilation = replace_stride_with_dilation
