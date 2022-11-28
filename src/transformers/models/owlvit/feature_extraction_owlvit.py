@@ -14,7 +14,8 @@
 # limitations under the License.
 """Feature extractor class for OwlViT."""
 
-from typing import List, Optional, Union
+import warnings
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 from PIL import Image
@@ -24,6 +25,7 @@ from transformers.image_utils import PILImageResampling
 from ...feature_extraction_utils import BatchFeature, FeatureExtractionMixin
 from ...image_transforms import center_to_corners_format
 from ...image_utils import ImageFeatureExtractionMixin
+from ...post_processing_utils import non_maximum_suppresion
 from ...utils import TensorType, is_torch_available, is_torch_tensor, logging
 
 
@@ -31,47 +33,6 @@ if is_torch_available():
     import torch
 
 logger = logging.get_logger(__name__)
-
-
-# Copied from transformers.models.detr.modeling_detr._upcast
-def _upcast(t):
-    # Protects from numerical overflows in multiplications by upcasting to the equivalent higher type
-    if t.is_floating_point():
-        return t if t.dtype in (torch.float32, torch.float64) else t.float()
-    else:
-        return t if t.dtype in (torch.int32, torch.int64) else t.int()
-
-
-def box_area(boxes):
-    """
-    Computes the area of a set of bounding boxes, which are specified by its (x1, y1, x2, y2) coordinates.
-
-    Args:
-        boxes (`torch.FloatTensor` of shape `(number_of_boxes, 4)`):
-            Boxes for which the area will be computed. They are expected to be in (x1, y1, x2, y2) format with `0 <= x1
-            < x2` and `0 <= y1 < y2`.
-
-    Returns:
-        `torch.FloatTensor`: a tensor containing the area for each box.
-    """
-    boxes = _upcast(boxes)
-    return (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-
-
-def box_iou(boxes1, boxes2):
-    area1 = box_area(boxes1)
-    area2 = box_area(boxes2)
-
-    left_top = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
-    right_bottom = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
-
-    width_height = (right_bottom - left_top).clamp(min=0)  # [N,M,2]
-    inter = width_height[:, :, 0] * width_height[:, :, 1]  # [N,M]
-
-    union = area1[:, None] + area2 - inter
-
-    iou = inter / union
-    return iou, union
 
 
 class OwlViTFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtractionMixin):
@@ -153,6 +114,12 @@ class OwlViTFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtractionMixin
             `List[Dict]`: A list of dictionaries, each dictionary containing the scores, labels and boxes for an image
             in the batch as predicted by the model.
         """
+        warnings.warn(
+            "`post_process` is deprecated and will be removed in v5 of Transformers, please use"
+            " `post_process_object_detection`",
+            FutureWarning,
+        )
+
         logits, boxes = outputs.logits, outputs.pred_boxes
 
         if len(logits) != len(target_sizes):
@@ -176,7 +143,76 @@ class OwlViTFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtractionMixin
 
         return results
 
-    def post_process_image_guided_detection(self, outputs, threshold=0.6, nms_threshold=0.3, target_sizes=None):
+    def post_process_object_detection(
+        self,
+        outputs,
+        threshold: float = 0.5,
+        nms_threshold: float = 0,
+        target_sizes: Union[TensorType, List[Tuple]] = None,
+    ):
+        """
+        Converts the output of [`OwlViTForObjectDetection`] into the format expected by the COCO api.
+
+        Args:
+            outputs ([`OwlViTObjectDetectionOutput`]):
+                Raw outputs of the model.
+            threshold (`float`, *optional*, defaults to 0.6):
+                Minimum confidence threshold to use to filter out predicted boxes.
+            nms_threshold (`float`, *optional*, defaults to 0):
+                IoU threshold for non-maximum suppression of overlapping boxes.
+            target_sizes (`torch.Tensor` or `List[Tuple[int, int]]`, *optional*, defaults to `None`):
+                Tensor of shape `(batch_size, 2)` or list of tuples (`Tuple[int, int]`) containing the target size
+                (height, width) of each image in the batch. If set, predicted normalized bounding boxes are rescaled to
+                the target sizes. If left to None, predictions will not be resized.
+
+        Returns:
+            `List[Dict]`: A list of dictionaries, each dictionary containing the scores, labels and boxes for an image
+            in the batch as predicted by the model.
+        """
+        logits, boxes = outputs.logits, outputs.pred_boxes
+
+        if target_sizes is not None:
+            if len(logits) != len(target_sizes):
+                raise ValueError(
+                    "Make sure that you pass in as many target sizes as the batch dimension of the logits"
+                )
+
+        probs = torch.max(logits, dim=-1)
+        scores = torch.sigmoid(probs.values)
+        labels = probs.indices
+
+        # Convert to [x0, y0, x1, y1] format
+        boxes = center_to_corners_format(boxes)
+
+        # Apply non-maximum suppression (NMS)
+        if nms_threshold > 0:
+            scores = non_maximum_suppresion(boxes, scores, nms_threshold)
+
+        # Convert from relative [0, 1] to absolute [0, height] coordinates
+        if isinstance(target_sizes, List):
+            img_h = torch.Tensor([i[0] for i in target_sizes])
+            img_w = torch.Tensor([i[1] for i in target_sizes])
+        else:
+            img_h, img_w = target_sizes.unbind(1)
+
+        scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
+        boxes = boxes * scale_fct[:, None, :]
+
+        # Filter results below threshold
+        results = []
+        for s, l, b in zip(scores, labels, boxes):
+            keep = s >= threshold
+            results.append({"scores": s[keep], "labels": l[keep], "boxes": b[keep]})
+
+        return results
+
+    def post_process_image_guided_detection(
+        self,
+        outputs,
+        threshold: float = 0.6,
+        nms_threshold: float = 0.3,
+        target_sizes: Union[TensorType, List[Tuple]] = None,
+    ):
         """
         Converts the output of [`OwlViTForObjectDetection.image_guided_detection`] into the format expected by the COCO
         api.
@@ -188,10 +224,10 @@ class OwlViTFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtractionMixin
                 Minimum confidence threshold to use to filter out predicted boxes.
             nms_threshold (`float`, *optional*, defaults to 0.3):
                 IoU threshold for non-maximum suppression of overlapping boxes.
-            target_sizes (`torch.Tensor`, *optional*):
-                Tensor of shape (batch_size, 2) where each entry is the (height, width) of the corresponding image in
-                the batch. If set, predicted normalized bounding boxes are rescaled to the target sizes. If left to
-                None, predictions will not be unnormalized.
+            target_sizes (`torch.Tensor` or `List[Tuple[int, int]]`, *optional*, defaults to `None`):
+                Tensor of shape `(batch_size, 2)` or list of tuples (`Tuple[int, int]`) containing the target size
+                (height, width) of each image in the batch. If set, predicted normalized bounding boxes are rescaled to
+                the target sizes. If left to None, predictions will not be resized.
 
         Returns:
             `List[Dict]`: A list of dictionaries, each dictionary containing the scores, labels and boxes for an image
@@ -200,10 +236,11 @@ class OwlViTFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtractionMixin
         """
         logits, target_boxes = outputs.logits, outputs.target_pred_boxes
 
-        if len(logits) != len(target_sizes):
-            raise ValueError("Make sure that you pass in as many target sizes as the batch dimension of the logits")
-        if target_sizes.shape[1] != 2:
-            raise ValueError("Each element of target_sizes must contain the size (h, w) of each image of the batch")
+        if target_sizes is not None:
+            if len(logits) != len(target_sizes):
+                raise ValueError(
+                    "Make sure that you pass in as many target sizes as the batch dimension of the logits"
+                )
 
         probs = torch.max(logits, dim=-1)
         scores = torch.sigmoid(probs.values)
@@ -212,18 +249,16 @@ class OwlViTFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtractionMixin
         target_boxes = center_to_corners_format(target_boxes)
 
         # Apply non-maximum suppression (NMS)
-        if nms_threshold < 1.0:
-            for idx in range(target_boxes.shape[0]):
-                for i in torch.argsort(-scores[idx]):
-                    if not scores[idx][i]:
-                        continue
-
-                    ious = box_iou(target_boxes[idx][i, :].unsqueeze(0), target_boxes[idx])[0][0]
-                    ious[i] = -1.0  # Mask self-IoU.
-                    scores[idx][ious > nms_threshold] = 0.0
+        if nms_threshold > 0:
+            scores = non_maximum_suppresion(target_boxes, scores, nms_threshold)
 
         # Convert from relative [0, 1] to absolute [0, height] coordinates
-        img_h, img_w = target_sizes.unbind(1)
+        if isinstance(target_sizes, List):
+            img_h = torch.Tensor([i[0] for i in target_sizes])
+            img_w = torch.Tensor([i[1] for i in target_sizes])
+        else:
+            img_h, img_w = target_sizes.unbind(1)
+
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
         target_boxes = target_boxes * scale_fct[:, None, :]
 

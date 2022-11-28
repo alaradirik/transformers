@@ -24,6 +24,7 @@ from PIL import Image
 from ...feature_extraction_utils import BatchFeature, FeatureExtractionMixin
 from ...image_transforms import center_to_corners_format, corners_to_center_format, rgb_to_id
 from ...image_utils import ImageFeatureExtractionMixin
+from ...post_processing_utils import non_maximum_suppresion
 from ...utils import TensorType, is_torch_available, is_torch_tensor, logging
 
 
@@ -688,7 +689,11 @@ class DeformableDetrFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtract
         return results
 
     def post_process_object_detection(
-        self, outputs, threshold: float = 0.5, target_sizes: Union[TensorType, List[Tuple]] = None
+        self,
+        outputs,
+        threshold: float = 0.5,
+        nms_threshold: float = 0,
+        target_sizes: Union[TensorType, List[Tuple]] = None,
     ):
         """
         Converts the output of [`DeformableDetrForObjectDetection`] into the format expected by the COCO api. Only
@@ -699,6 +704,8 @@ class DeformableDetrFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtract
                 Raw outputs of the model.
             threshold (`float`, *optional*):
                 Score threshold to keep object detection predictions.
+            nms_threshold (`float`, *optional*, defaults to 0):
+                IoU threshold for non-maximum suppression of overlapping boxes.
             target_sizes (`torch.Tensor` or `List[Tuple[int, int]]`, *optional*, defaults to `None`):
                 Tensor of shape `(batch_size, 2)` or list of tuples (`Tuple[int, int]`) containing the target size
                 (height, width) of each image in the batch. If left to None, predictions will not be resized.
@@ -722,6 +729,10 @@ class DeformableDetrFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtract
         labels = topk_indexes % out_logits.shape[2]
         boxes = center_to_corners_format(out_bbox)
         boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, 4))
+
+        # Apply non-maximum suppression (NMS)
+        if nms_threshold > 0:
+            scores = non_maximum_suppresion(boxes, scores, nms_threshold)
 
         # and from relative [0, 1] to absolute [0, height] coordinates
         if isinstance(target_sizes, List):

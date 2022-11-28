@@ -26,6 +26,7 @@ from PIL import Image
 from ...feature_extraction_utils import BatchFeature, FeatureExtractionMixin
 from ...image_transforms import center_to_corners_format, corners_to_center_format, id_to_rgb, rgb_to_id
 from ...image_utils import ImageFeatureExtractionMixin
+from ...post_processing_utils import non_maximum_suppresion
 from ...utils import TensorType, is_torch_available, is_torch_tensor, logging
 
 
@@ -1062,7 +1063,11 @@ class DetrFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtractionMixin):
         return preds
 
     def post_process_object_detection(
-        self, outputs, threshold: float = 0.5, target_sizes: Union[TensorType, List[Tuple]] = None
+        self,
+        outputs,
+        threshold: float = 0.5,
+        nms_threshold: float = 0,
+        target_sizes: Union[TensorType, List[Tuple]] = None,
     ):
         """
         Converts the output of [`DetrForObjectDetection`] into the format expected by the COCO api. Only supports
@@ -1073,6 +1078,8 @@ class DetrFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtractionMixin):
                 Raw outputs of the model.
             threshold (`float`, *optional*):
                 Score threshold to keep object detection predictions.
+            nms_threshold (`float`, *optional*, defaults to 0):
+                IoU threshold for non-maximum suppression of overlapping boxes.
             target_sizes (`torch.Tensor` or `List[Tuple[int, int]]`, *optional*, defaults to `None`):
                 Tensor of shape `(batch_size, 2)` or list of tuples (`Tuple[int, int]`) containing the target size
                 (height, width) of each image in the batch. If left to None, predictions will not be resized.
@@ -1081,19 +1088,23 @@ class DetrFeatureExtractor(FeatureExtractionMixin, ImageFeatureExtractionMixin):
             `List[Dict]`: A list of dictionaries, each dictionary containing the scores, labels and boxes for an image
             in the batch as predicted by the model.
         """
-        out_logits, out_bbox = outputs.logits, outputs.pred_boxes
+        logits, boxes = outputs.logits, outputs.pred_boxes
 
         if target_sizes is not None:
-            if len(out_logits) != len(target_sizes):
+            if len(logits) != len(target_sizes):
                 raise ValueError(
                     "Make sure that you pass in as many target sizes as the batch dimension of the logits"
                 )
 
-        prob = nn.functional.softmax(out_logits, -1)
+        prob = nn.functional.softmax(logits, -1)
         scores, labels = prob[..., :-1].max(-1)
 
         # Convert to [x0, y0, x1, y1] format
-        boxes = center_to_corners_format(out_bbox)
+        boxes = center_to_corners_format(boxes)
+
+        # Apply non-maximum suppression (NMS)
+        if nms_threshold > 0:
+            scores = non_maximum_suppresion(boxes, scores, nms_threshold)
 
         # Convert from relative [0, 1] to absolute [0, height] coordinates
         if target_sizes is not None:
