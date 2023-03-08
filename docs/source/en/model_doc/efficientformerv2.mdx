@@ -1,0 +1,51 @@
+<!--Copyright 2023 The HuggingFace Team. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
+the License. You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+-->
+
+# EfficientFormerV2
+
+## Overview
+
+The EfficientFormerV2 model was proposed in [Rethinking Vision Transformers for MobileNet Size and Speed](https://arxiv.org/abs/2212.08059) by Yanyu Li, Ju Hu, Yang Wen, Georgios Evangelidis, Kamyar Salahi, Yanzhi Wang, Sergey Tulyakov, Jian Ren.  EfficientFormerV2 proposes a
+mobile-friendly vision transformer that can be run on mobile devices for dense prediction tasks like image classification, object
+detection and semantic segmentation, and features significant performance and efficiency improvements over [EfficientFormer](efficientformer).
+
+The abstract from the paper is the following:
+
+*With the success of Vision Transformers (ViTs) in computer vision tasks, recent arts try to optimize the performance and complexity of ViTs to enable efficient deployment on mobile devices. Multiple approaches are proposed to accelerate attention mechanism, improve inefficient designs, or incorporate mobile-friendly lightweight convolutions to form hybrid architectures. However, ViT and its variants still have higher latency or considerably more parameters than lightweight CNNs, even true for the years-old MobileNet. In practice, latency and size are both crucial for efficient deployment on resource-constraint hardware. In this work, we investigate a central question, can transformer models run as fast as MobileNet and maintain a similar size? We revisit the design choices of ViTs and propose an improved supernet with low latency and high parameter efficiency. We further introduce a fine-grained joint search strategy that can find efficient architectures by optimizing latency and number of parameters simultaneously. The proposed models, EfficientFormerV2, achieve about 4% higher top-1 accuracy than MobileNetV2 and MobileNetV2×1.4 on ImageNet-1K with similar latency and parameters. We demonstrate that properly designed and optimized vision transformers can achieve high performance with MobileNet-level size and speed.*
+
+This model was contributed by [adirik](https://huggingface.co/adirik).
+The original code can be found [here](https://github.com/snap-research/EfficientFormer).
+
+
+## EfficientFormerV2Config
+
+[[autodoc]] EfficientFormerV2Config
+
+## EfficientFormerV2ImageProcessor
+
+[[autodoc]] EfficientFormerImageProcessor
+    - preprocess
+
+## EfficientFormerV2Model
+
+[[autodoc]] EfficientFormerV2Model
+    - forward
+
+## EfficientFormerV2ForImageClassification
+
+[[autodoc]] EfficientFormerV2ForImageClassification
+    - forward
+
+## EfficientFormerV2ForImageClassificationWithTeacher
+
+[[autodoc]] EfficientFormerV2ForImageClassificationWithTeacher
+    - forward

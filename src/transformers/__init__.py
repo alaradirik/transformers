@@ -273,6 +273,7 @@ _import_structure = {
     ],
     "models.dpt": ["DPT_PRETRAINED_CONFIG_ARCHIVE_MAP", "DPTConfig"],
     "models.efficientformer": ["EFFICIENTFORMER_PRETRAINED_CONFIG_ARCHIVE_MAP", "EfficientFormerConfig"],
+    "models.efficientformerv2": ["EFFICIENTFORMERV2_PRETRAINED_CONFIG_ARCHIVE_MAP", "EfficientFormerV2Config"],
     "models.efficientnet": ["EFFICIENTNET_PRETRAINED_CONFIG_ARCHIVE_MAP", "EfficientNetConfig"],
     "models.electra": ["ELECTRA_PRETRAINED_CONFIG_ARCHIVE_MAP", "ElectraConfig", "ElectraTokenizer"],
     "models.encoder_decoder": ["EncoderDecoderConfig"],
@@ -1463,6 +1464,15 @@ else:
             "EfficientFormerForImageClassificationWithTeacher",
             "EfficientFormerModel",
             "EfficientFormerPreTrainedModel",
+        ]
+    )
+    _import_structure["models.efficientformerv2"].extend(
+        [
+            "EFFICIENTFORMERV2_PRETRAINED_MODEL_ARCHIVE_LIST",
+            "EfficientFormerV2ForImageClassification",
+            "EfficientFormerV2ForImageClassificationWithTeacher",
+            "EfficientFormerV2Model",
+            "EfficientFormerV2PreTrainedModel",
         ]
     )
     _import_structure["models.efficientnet"].extend(
@@ -3869,6 +3879,7 @@ if TYPE_CHECKING:
     )
     from .models.dpt import DPT_PRETRAINED_CONFIG_ARCHIVE_MAP, DPTConfig
     from .models.efficientformer import EFFICIENTFORMER_PRETRAINED_CONFIG_ARCHIVE_MAP, EfficientFormerConfig
+    from .models.efficientformerv2 import EFFICIENTFORMERV2_PRETRAINED_CONFIG_ARCHIVE_MAP, EfficientFormerV2Config
     from .models.efficientnet import EFFICIENTNET_PRETRAINED_CONFIG_ARCHIVE_MAP, EfficientNetConfig
     from .models.electra import ELECTRA_PRETRAINED_CONFIG_ARCHIVE_MAP, ElectraConfig, ElectraTokenizer
     from .models.encoder_decoder import EncoderDecoderConfig
@@ -4891,6 +4902,13 @@ if TYPE_CHECKING:
             EfficientFormerForImageClassificationWithTeacher,
             EfficientFormerModel,
             EfficientFormerPreTrainedModel,
+        )
+        from .models.efficientformerv2 import (
+            EFFICIENTFORMERV2_PRETRAINED_MODEL_ARCHIVE_LIST,
+            EfficientFormerV2ForImageClassification,
+            EfficientFormerV2ForImageClassificationWithTeacher,
+            EfficientFormerV2Model,
+            EfficientFormerV2PreTrainedModel,
         )
         from .models.efficientnet import (
             EFFICIENTNET_PRETRAINED_MODEL_ARCHIVE_LIST,
