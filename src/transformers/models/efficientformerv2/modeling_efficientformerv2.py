@@ -400,32 +400,23 @@ class EfficientFormerV2DropPath(nn.Module):
 
 
 class EfficientFormerV2ConvMlp(nn.Module):
-    def __init__(
-        self,
-        config: EfficientFormerV2Config,
-        in_dim: int,
-        hidden_dim: Optional[int] = None,
-        mid_conv: Bool = False,
-    ):
+    def __init__(self, config: EfficientFormerV2Config, in_dim: int, hidden_dim: int):
         super().__init__()
         out_dim = in_dim
-
-        self.mid_convolution = mid_conv
         self.convolution1 = nn.Conv2d(in_dim, hidden_dim, 1)
         self.activation = ACT2FN[config.hidden_act]
         self.convolution2 = nn.Conv2d(hidden_dim, out_dim, 1)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-        if self.mid_convolution:
-            self.mid = nn.Conv2d(
-                hidden_dim, 
-                hidden_dim, 
-                kernel_size=3, 
-                stride=1, 
-                padding=1,
-                groups=hidden_dim
-            )
-            self.mid_norm = nn.BatchNorm2d(hidden_dim)
+        self.mid_convolution = nn.Conv2d(
+            hidden_dim, 
+            hidden_dim, 
+            kernel_size=3, 
+            stride=1, 
+            padding=1,
+            groups=hidden_dim
+        )
+        self.mid_norm = nn.BatchNorm2d(hidden_dim)
 
         self.batchnorm_before = nn.BatchNorm2d(hidden_dim)
         self.batchnorm_after = nn.BatchNorm2d(out_dim)
@@ -435,10 +426,9 @@ class EfficientFormerV2ConvMlp(nn.Module):
         hidden_state = self.batchnorm_before(hidden_state)
         hidden_state = self.activation(hidden_state)
 
-        if self.mid_convolution:
-            hidden_state = self.mid(hidden_state)
-            hidden_state = self.mid_norm(hidden_state)
-            hidden_state = self.activation(hidden_state)
+        hidden_state = self.mid_convolution(hidden_state)
+        hidden_state = self.mid_norm(hidden_state)
+        hidden_state = self.activation(hidden_state)
 
         hidden_state = self.dropout(hidden_state)
         hidden_state = self.convolution2(hidden_state)
@@ -451,22 +441,19 @@ class EfficientFormerV2AttentionFFN(nn.Module):
     def __init__(
         self,  config: EfficientFormerV2Config, dim: int, drop_path_rate: int, resolution=7, stride=None):
         super().__init__()
-
         self.use_layer_scale = config.use_layer_scale
-        layer_scale_init_value = config.layer_scale_init_value
-        mlp_hidden_dim = int(dim * config.mlp_expansion_ratio)
-
         self.token_mixer = Attention4D(dim, resolution=resolution, act_layer=act_layer, stride=stride)
-        self.mlp = EfficientFormerV2ConvMlp(
-            config, in_features=dim, hidden_features=mlp_hidden_dim, drop=config.hidden_dropout_prob, mid_convolution=True
-        )
+
+        mlp_hidden_dim = int(dim * config.mlp_expansion_ratio)
+        self.mlp = EfficientFormerV2ConvMlp(config, in_dim=dim, hidden_dim=mlp_hidden_dim)
 
         self.drop_path = EfficientFormerV2DropPath(drop_path_rate) if config.drop_path_rate > 0. else nn.Identity()
         if self.use_layer_scale:
+            layer_scale_init_value = config.layer_scale_init_value
             self.layer_scale_1 = nn.Parameter(layer_scale_init_value * torch.ones(dim).unsqueeze(-1).unsqueeze(-1), requires_grad=True)
             self.layer_scale_2 = nn.Parameter(layer_scale_init_value * torch.ones(dim).unsqueeze(-1).unsqueeze(-1), requires_grad=True)
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.use_layer_scale:
             hidden_states = hidden_states + self.drop_path(self.layer_scale_1 * self.token_mixer(hidden_states))
             hidden_states = hidden_states + self.drop_path(self.layer_scale_2 * self.mlp(hidden_states))
@@ -481,17 +468,13 @@ class EfficientFormerV2FFN(nn.Module):
         super().__init__()
         mlp_hidden_dim = int(dim * config.mlp_expansion_ratio)
         self.use_layer_scale = config.use_layer_scale
-
-        self.mlp = EfficientFormerV2ConvMlp(in_dim=dim, hidden_dim=mlp_hidden_dim, mid_conv=True)
-        if drop_path_rate > 0:
-            self.drop_path = EfficientFormerV2DropPath(drop_path_rate)
-        else:
-            self.drop_path = nn.Identity()
+        self.mlp = EfficientFormerV2ConvMlp(in_dim=dim, hidden_dim=mlp_hidden_dim)
+        self.drop_path = EfficientFormerV2DropPath(drop_path_rate) if drop_path_rate > 0 else nn.Identity()
         
         if self.use_layer_scale:
             self.layer_scale_2 = nn.Parameter(config.layer_scale_init_value * torch.ones(dim).unsqueeze(-1).unsqueeze(-1), requires_grad=True)
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.use_layer_scale:
             hidden_states = hidden_states + self.drop_path(self.layer_scale_2 * self.mlp(hidden_states))
         else:
@@ -500,12 +483,39 @@ class EfficientFormerV2FFN(nn.Module):
 
 
 class EfficientFormerV2Block(nn.Module):
-    def __init__(self, config: EfficientFormerV2Config, index: int, resolution: int):
+    def __init__(self, config: EfficientFormerV2Config, dim: int, index: int, layers, pool_size=3, mlp_ratio=4., drop_path_rate=0., vit_num=1, resolution=7, e_ratios=None):
         super().__init__()
-        self.meta4D_layers = EfficientFormerV2Meta4DLayers(config, index)
+        blocks = []
+        for block_idx in range(layers[index]):
+            block_dpr = drop_path_rate * (
+                    block_idx + sum(layers[:index])) / (sum(layers) - 1)
+            mlp_ratio = e_ratios[str(index)][block_idx]
+            if index >= 2 and block_idx > layers[index] - 1 - vit_num:
+                if index == 2:
+                    stride = 2
+                else:
+                    stride = None
+                blocks.append(AttnFFN(
+                    dim, mlp_ratio=mlp_ratio,
+                    act_layer=act_layer, norm_layer=norm_layer,
+                    drop=drop_rate, drop_path=block_dpr,
+                    use_layer_scale=use_layer_scale,
+                    layer_scale_init_value=layer_scale_init_value,
+                    resolution=resolution,
+                    stride=stride,
+                ))
+            else:
+                blocks.append(FFN(
+                    dim, pool_size=pool_size, mlp_ratio=mlp_ratio,
+                    act_layer=act_layer,
+                    drop=drop_rate, drop_path=block_dpr,
+                    use_layer_scale=use_layer_scale,
+                    layer_scale_init_value=layer_scale_init_value,
+                ))
+        self.blocks = nn.Sequential(*blocks)
 
     def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor]:
-        hidden_states = self.meta4D_layers(hidden_states)
+        hidden_states = self.blocks(hidden_states)
         return hidden_states
 
 
