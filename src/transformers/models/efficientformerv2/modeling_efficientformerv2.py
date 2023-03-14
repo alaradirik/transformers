@@ -64,10 +64,8 @@ class EfficientFormerV2ConvStem(nn.Module):
 
         self.convolution1 = nn.Conv2d(config.num_channels, out_channels // 2, kernel_size=3, stride=2, padding=1)
         self.batchnorm_before = nn.BatchNorm2d(out_channels // 2)
-
         self.convolution2 = nn.Conv2d(out_channels // 2, out_channels, kernel_size=3, stride=2, padding=1)
         self.batchnorm_after = nn.BatchNorm2d(out_channels)
-
         self.activation = ACT2FN[config.hidden_act]
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
@@ -80,221 +78,69 @@ class EfficientFormerV2ConvStem(nn.Module):
 
 
 class EfficientFormerV2LGQuery(torch.nn.Module):
-    def __init__(self, in_dim, out_dim, resolution1, resolution2):
+    def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
-        self.resolution1 = resolution1
-        self.resolution2 = resolution2
         self.pool = nn.AvgPool2d(1, 2, 0)
-        self.local = nn.Sequential(nn.Conv2d(in_dim, in_dim, kernel_size=3, stride=2, padding=1, groups=in_dim),
-                                   )
-        self.proj = nn.Sequential(nn.Conv2d(in_dim, out_dim, 1),
-                                  nn.BatchNorm2d(out_dim), )
+        self.local = nn.Sequential(nn.Conv2d(in_dim, in_dim, kernel_size=3, stride=2, padding=1, groups=in_dim))
+        self.proj = nn.Sequential(nn.Conv2d(in_dim, out_dim, 1), nn.BatchNorm2d(out_dim))
 
-    def forward(self, x):
-        local_q = self.local(x)
-        pool_q = self.pool(x)
-        q = local_q + pool_q
-        q = self.proj(q)
-        return q
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        local_query = self.local(hidden_states)
+        pool_query = self.pool(hidden_states)
+        query = local_query + pool_query
+        query = self.proj(query)
+
+        return query
 
 
 class EfficientFormerV2Attention4DDownsample(torch.nn.Module):
-    def __init__(
-        self, 
-        dim=384, 
-        key_dim=16, 
-        num_heads=8,         
-        attn_ratio=4,
-        resolution=7,
-        out_dim=None,
-        act_layer=None,
-    ):
+    def __init__(self, config: EfficientFormerV2Config, dim: int, out_dim: int, resolution: int):
         super().__init__()
 
-        self.num_heads = num_heads
+        key_dim = config.downsample_key_dim
+        self.num_heads = config.num_attention_heads
         self.scale = key_dim ** -0.5
-        self.key_dim = key_dim
-        self.nh_kd = nh_kd = key_dim * num_heads
-
         self.resolution = resolution
-
-        self.d = int(attn_ratio * key_dim)
-        self.dh = int(attn_ratio * key_dim) * num_heads
-        self.attn_ratio = attn_ratio
-        h = self.dh + nh_kd * 2
-
-        if out_dim is not None:
-            self.out_dim = out_dim
-        else:
-            self.out_dim = dim
+        self.dim = int(config.attention_ratio * key_dim)
+        self.dim_head = int(config.attention_ratio * key_dim) * num_heads
+        self.out_dim = out_dim if out_dim is not None else dim
         self.resolution2 = math.ceil(self.resolution / 2)
-        self.q = EfficientFormerLGQuery(dim, self.num_heads * self.key_dim, self.resolution, self.resolution2)
 
-        self.N = self.resolution ** 2
-        self.N2 = self.resolution2 ** 2
-
-        self.k = nn.Sequential(nn.Conv2d(dim, self.num_heads * self.key_dim, 1),
-                               nn.BatchNorm2d(self.num_heads * self.key_dim), )
-        self.v = nn.Sequential(nn.Conv2d(dim, self.num_heads * self.d, 1),
-                               nn.BatchNorm2d(self.num_heads * self.d),
-                               )
-        self.v_local = nn.Sequential(nn.Conv2d(self.num_heads * self.d, self.num_heads * self.d,
-                                               kernel_size=3, stride=2, padding=1, groups=self.num_heads * self.d),
-                                     nn.BatchNorm2d(self.num_heads * self.d), )
-
-        self.proj = nn.Sequential(
-            act_layer(),
-            nn.Conv2d(self.dh, self.out_dim, 1),
-            nn.BatchNorm2d(self.out_dim), )
+        self.query = EfficientFormerV2LGQuery(dim, self.num_heads * key_dim)
+        self.key = nn.Sequential(nn.Conv2d(dim, self.num_heads * key_dim, 1), nn.BatchNorm2d(self.num_heads * key_dim))
+        self.value = nn.Sequential(nn.Conv2d(dim, self.num_heads * self.dim, 1), nn.BatchNorm2d(self.num_heads * self.dim))
+        self.value_local = nn.Sequential(
+            nn.Conv2d(
+                self.num_heads * self.dim, 
+                self.num_heads * self.dim, 
+                kernel_size=3, 
+                stride=2, 
+                padding=1, 
+                groups=self.num_heads * self.dim,
+            ),
+            nn.BatchNorm2d(self.num_heads * self.dim), 
+        )
+        self.projection = nn.Sequential(
+            ACT2FN[config.hidden_act],
+            nn.Conv2d(self.dim_head, self.out_dim, 1),
+            nn.BatchNorm2d(self.out_dim),
+        )
 
         points = list(itertools.product(range(self.resolution), range(self.resolution)))
         points_ = list(itertools.product(range(self.resolution2), range(self.resolution2)))
-        N = len(points)
-        N_ = len(points_)
-        attention_offsets = {}
+        offset_ratio = math.ceil(self.resolution / self.resolution2)
+
         idxs = []
+        attention_offsets = {}
         for p1 in points_:
             for p2 in points:
-                size = 1
-                offset = (
-                    abs(p1[0] * math.ceil(self.resolution / self.resolution2) - p2[0] + (size - 1) / 2),
-                    abs(p1[1] * math.ceil(self.resolution / self.resolution2) - p2[1] + (size - 1) / 2))
+                offset = (abs(p1[0] * offset_ratio - p2[0] / 2), abs(p1[1] * offset_ratio - p2[1] / 2))
                 if offset not in attention_offsets:
                     attention_offsets[offset] = len(attention_offsets)
                 idxs.append(attention_offsets[offset])
-        self.attention_biases = torch.nn.Parameter(
-            torch.zeros(num_heads, len(attention_offsets)))
-        self.register_buffer('attention_bias_idxs',
-                             torch.LongTensor(idxs).view(N_, N))
 
-    @torch.no_grad()
-    def train(self, mode=True):
-        super().train(mode)
-        if mode and hasattr(self, 'ab'):
-            del self.ab
-        else:
-            self.ab = self.attention_biases[:, self.attention_bias_idxs]
-
-    def forward(self, x):  # x (B,N,C)
-        B, C, H, W = x.shape
-
-        q = self.q(x).flatten(2).reshape(B, self.num_heads, -1, self.N2).permute(0, 1, 3, 2)
-        k = self.k(x).flatten(2).reshape(B, self.num_heads, -1, self.N).permute(0, 1, 2, 3)
-        v = self.v(x)
-        v_local = self.v_local(v)
-        v = v.flatten(2).reshape(B, self.num_heads, -1, self.N).permute(0, 1, 3, 2)
-
-        attn = (
-                (q @ k) * self.scale
-                +
-                (self.attention_biases[:, self.attention_bias_idxs]
-                 if self.training else self.ab)
-        )
-
-        # attn = (q @ k) * self.scale
-        attn = attn.softmax(dim=-1)
-        x = (attn @ v).transpose(2, 3)
-        out = x.reshape(B, self.dh, self.resolution2, self.resolution2) + v_local
-
-        out = self.proj(out)
-        return out
-
-
-class EfficientFormerV2PatchEmbeddings(nn.Module):
-    """
-    This class performs downsampling between two stages. For the input tensor with the shape [batch_size, num_channels,
-    height, width] it produces output tensor with the shape [batch_size, num_channels, height/stride, width/stride]
-    """
-
-    def __init__(
-        self, 
-        config: EfficientFormerV2Config, 
-        num_channels: int, 
-        embed_dim: int, 
-        resolution: int, 
-        apply_norm: bool = True, 
-        light=False, 
-        asub=False, 
-        attn_block=Attention4DDownsample
-    ):
-        super().__init__()
-
-        self.num_channels = num_channels
-        self.light = light
-        self.asub = asub
-
-        if self.light:
-            self.new_proj = nn.Sequential(
-                nn.Conv2d(num_channels, num_channels, kernel_size=3, stride=2, padding=1, groups=num_channels),
-                nn.BatchNorm2d(num_channels),
-                nn.Hardswish(),
-                nn.Conv2d(num_channels, embed_dim, kernel_size=1, stride=1, padding=0),
-                nn.BatchNorm2d(embed_dim),
-            )
-            self.skip = nn.Sequential(
-                nn.Conv2d(num_channels, embed_dim, kernel_size=1, stride=2, padding=0),
-                nn.BatchNorm2d(embed_dim)
-            )
-        elif self.asub:
-            self.attn = attn_block(dim=in_chans, out_dim=embed_dim, resolution=resolution, act_layer=nn.GELU)
-            self.conv = nn.Conv2d(
-                num_channels, 
-                embed_dim, 
-                kernel_size=config.downsample_patch_size,
-                stride=config.downsample_stride,
-                padding=config.downsample_pad,
-            )
-            self.bn = nn.BatchNorm2d(embed_dim) if apply_norm else nn.Identity()
-        else:
-            self.projection = nn.Conv2d(
-                num_channels,
-                embed_dim,
-                kernel_size=config.downsample_patch_size,
-                stride=config.downsample_stride,
-                padding=config.downsample_pad,
-            )
-            self.norm = nn.BatchNorm2d(embed_dim) if apply_norm else nn.Identity()
-        
-
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        batch_size, num_channels, height, width = pixel_values.shape
-        if num_channels != self.num_channels:
-            raise ValueError(
-                "Make sure that the channel dimension of the pixel values match with the one set in the configuration."
-            )
-
-        embeddings = self.projection(pixel_values)
-        embeddings = self.norm(embeddings)
-
-        return embeddings
-
-
-class EfficientFormerV2SelfAttention(nn.Module):
-    def __init__(self, dim: int, key_dim: int, num_heads: int, attention_ratio: int, resolution: int):
-        super().__init__()
-
-        self.num_heads = num_heads
-        self.key_dim = key_dim
-        self.attention_ratio = attention_ratio
-        self.scale = key_dim**-0.5
-        self.total_key_dim = key_dim * num_heads
-        self.expanded_key_dim = int(attention_ratio * key_dim)
-        self.total_expanded_key_dim = int(self.expanded_key_dim * num_heads)
-        hidden_size = self.total_expanded_key_dim + self.total_key_dim * 2
-        self.qkv = nn.Linear(dim, hidden_size)
-        self.projection = nn.Linear(self.total_expanded_key_dim, dim)
-        points = list(itertools.product(range(resolution), range(resolution)))
-        num_points = len(points)
-        attention_offsets = {}
-        idxs = []
-        for point_1 in points:
-            for point_2 in points:
-                offset = (abs(point_1[0] - point_2[0]), abs(point_1[1] - point_2[1]))
-                if offset not in attention_offsets:
-                    attention_offsets[offset] = len(attention_offsets)
-                idxs.append(attention_offsets[offset])
         self.attention_biases = torch.nn.Parameter(torch.zeros(num_heads, len(attention_offsets)))
-        self.register_buffer("attention_bias_idxs", torch.LongTensor(idxs).view(num_points, num_points))
+        self.register_buffer("attention_bias_idxs", torch.LongTensor(idxs).view(len(points_), len(points)))
 
     @torch.no_grad()
     def train(self, mode=True):
@@ -304,29 +150,161 @@ class EfficientFormerV2SelfAttention(nn.Module):
         else:
             self.ab = self.attention_biases[:, self.attention_bias_idxs]
 
-    def forward(self, hidden_states: torch.Tensor, output_attentions: bool = False) -> Tuple[torch.Tensor]:
-        batch_size, sequence_length, num_channels = hidden_states.shape
-        qkv = self.qkv(hidden_states)
-        query_layer, key_layer, value_layer = qkv.reshape(batch_size, sequence_length, self.num_heads, -1).split(
-            [self.key_dim, self.key_dim, self.expanded_key_dim], dim=3
-        )
-        query_layer = query_layer.permute(0, 2, 1, 3)
-        key_layer = key_layer.permute(0, 2, 1, 3)
-        value_layer = value_layer.permute(0, 2, 1, 3)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        batch_size, num_channels = hidden_states.shape[:2]
 
-        attention_probs = (torch.matmul(query_layer, key_layer.transpose(-2, -1))) * self.scale + (
+        query = self.query(hidden_states).flatten(2)
+        query = query.reshape(batch_size, self.num_heads, -1, self.resolution2**2).permute(0, 1, 3, 2)
+        key = self.key(hidden_states).flatten(2)
+        key = key.reshape(batch_size, self.num_heads, -1, self.resolution**2).permute(0, 1, 2, 3)
+        value = self.value(hidden_states)
+        value_local = self.value_local(value)
+
+        value = value.flatten(2).reshape(batch_size, self.num_heads, -1, self.resolution**2).permute(0, 1, 3, 2)
+        attention = (torch.matmul(query, key)) * self.scale + (
             self.attention_biases[:, self.attention_bias_idxs] if self.training else self.ab
         )
+        attention = attention.softmax(dim=-1)
 
-        attention_probs = attention_probs.softmax(dim=-1)
+        hidden_states = (attention @ value).transpose(2, 3)
+        hidden_states = hidden_states.reshape(batch_size, self.dim_head, self.resolution2, self.resolution2) + value_local
+        hidden_states = self.projection(hidden_states)
+        
+        return hidden_states
 
-        context_layer = torch.matmul(attention_probs, value_layer).transpose(1, 2)
-        context_layer = context_layer.reshape(batch_size, sequence_length, self.total_expanded_key_dim)
-        context_layer = self.projection(context_layer)
 
-        outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
+class EfficientFormerV2Attention4D(torch.nn.Module):
+    def __init__(self, config: EfficientFormerV2Config, dim: int, resolution: int, stride: int):
+        super().__init__()
+        key_dim = config.key_dim
+        self.num_heads = config.num_attention_heads
+        self.scale = config.key_dim ** -0.5
 
-        return outputs
+        if stride is not None:
+            self.resolution = math.ceil(resolution / stride)
+            self.stride_conv = nn.Sequential(
+                nn.Conv2d(dim, dim, kernel_size=3, stride=stride, padding=1, groups=dim),
+                nn.BatchNorm2d(dim)
+            )
+            self.upsample = nn.Upsample(scale_factor=stride, mode="bilinear")
+        else:
+            self.resolution = resolution
+            self.stride_conv = None
+            self.upsample = None
+
+        self.out_dim = self.resolution ** 2
+        self.dim = int(config.attention_ratio * key_dim)
+        self.dim_head = int(config.attention_ratio * key_dim) * num_heads
+
+        self.query = nn.Sequential(nn.Conv2d(dim, self.num_heads * self.key_dim, 1), nn.BatchNorm2d(self.num_heads * key_dim))
+        self.key = nn.Sequential(nn.Conv2d(dim, self.num_heads * self.key_dim, 1), nn.BatchNorm2d(self.num_heads * key_dim))
+        self.value = nn.Sequential(nn.Conv2d(dim, self.num_heads * self.dim, 1), nn.BatchNorm2d(self.num_heads * self.dim))
+        self.value_local = nn.Sequential(
+            nn.Conv2d(self.num_heads * self.dim, self.num_heads * self.dim, kernel_size=3, stride=1, padding=1, groups=self.num_heads * self.dim),
+            nn.BatchNorm2d(self.num_heads * self.dim)
+        )
+        self.talking_head1 = nn.Conv2d(self.num_heads, self.num_heads, kernel_size=1, stride=1, padding=0)
+        self.talking_head2 = nn.Conv2d(self.num_heads, self.num_heads, kernel_size=1, stride=1, padding=0)
+        self.projection = nn.Sequential(ACT2FN[config.hidden_act], nn.Conv2d(self.dim_head, dim, 1), nn.BatchNorm2d(dim))
+
+        points = list(itertools.product(range(self.resolution), range(self.resolution)))
+        attention_offsets = {}
+        idxs = []
+        for p1 in points:
+            for p2 in points:
+                offset = (abs(p1[0] - p2[0]), abs(p1[1] - p2[1]))
+                if offset not in attention_offsets:
+                    attention_offsets[offset] = len(attention_offsets)
+                idxs.append(attention_offsets[offset])
+
+        self.attention_biases = torch.nn.Parameter(torch.zeros(num_heads, len(attention_offsets)))
+        self.register_buffer("attention_bias_idxs", torch.LongTensor(idxs).view(len(points), len(points)))
+
+    @torch.no_grad()
+    def train(self, mode=True):
+        super().train(mode)
+        if mode and hasattr(self, "ab"):
+            del self.ab
+        else:
+            self.ab = self.attention_biases[:, self.attention_bias_idxs]
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        batch_size, num_channels = hidden_states.shape[:2]
+        if self.stride_conv is not None:
+            hidden_states = self.stride_conv(hidden_states)
+
+        query = self.query(hidden_states).flatten(2).reshape(batch_size, self.num_heads, -1, self.out_dim).permute(0, 1, 3, 2)
+        key = self.key(hidden_states).flatten(2).reshape(batch_size, self.num_heads, -1, self.out_dim).permute(0, 1, 2, 3)
+        value = self.value(hidden_states)
+        value_local = self.value_local(value)
+        value = value.flatten(2).reshape(batch_size, self.num_heads, -1, self.out_dim).permute(0, 1, 3, 2)
+
+        attention = (torch.matmul(query, key)) * self.scale + (
+            self.attention_biases[:, self.attention_bias_idxs] if self.training else self.ab
+        )
+        attention = self.talking_head1(attention)
+        attention = attention.softmax(dim=-1)
+        attention = self.talking_head2(attention)
+
+        hidden_states = (attention @ value).transpose(2, 3)
+        hidden_states = hidden_states.reshape(batch_size, self.dim_head, self.resolution, self.resolution) + value_local
+
+        if self.upsample is not None:
+            hidden_states = self.upsample(hidden_states)
+        hidden_states = self.projection(hidden_states)
+
+        return hidden_states
+
+        
+class EfficientFormerV2PatchEmbeddings(nn.Module):
+    """
+    This class performs downsampling between two stages. For the input tensor with the shape [batch_size, num_channels,
+    height, width] it produces output tensor with the shape [batch_size, num_channels, height/stride, width/stride]
+    """
+
+    def __init__(self, config: EfficientFormerV2Config, in_dim: int, embed_dim: int, resolution: int, asub: bool = False):
+        super().__init__()
+
+        self.asub = asub
+        self.num_channels = in_dim
+
+        if self.asub:
+            self.attention = EfficientFormerV2Attention4DDownsample(config=config, dim=in_dim, out_dim=embed_dim, resolution=resolution)
+            self.convolution = nn.Conv2d(
+                num_channels, 
+                embed_dim, 
+                kernel_size=config.downsample_patch_size,
+                stride=config.downsample_stride,
+                padding=config.downsample_pad,
+            )
+            self.batch_norm = nn.BatchNorm2d(embed_dim)
+        else:
+            self.projection = nn.Conv2d(
+                num_channels,
+                embed_dim,
+                kernel_size=config.downsample_patch_size,
+                stride=config.downsample_stride,
+                padding=config.downsample_pad,
+            )
+            self.norm = nn.BatchNorm2d(embed_dim)
+        
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        batch_size, num_channels, height, width = pixel_values.shape
+        if num_channels != self.num_channels:
+            raise ValueError(
+                "Make sure that the channel dimension of the pixel values match with the one set in the configuration."
+            )
+
+        if self.asub:
+            embeddings_ = self.convolution(pixel_values)
+            embeddings_ = self.batch_norm(embeddings_)
+            embeddings = self.attention(embeddings) + embeddings_
+        else:
+            embeddings = self.projection(pixel_values)
+            embeddings = self.norm(embeddings)
+
+        return embeddings
 
 
 class EfficientFormerV2Pooling(nn.Module):
@@ -337,33 +315,6 @@ class EfficientFormerV2Pooling(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         output = self.pool(hidden_states) - hidden_states
         return output
-
-
-class EfficientFormerV2DenseMlp(nn.Module):
-    def __init__(
-        self,
-        config: EfficientFormerV2Config,
-        in_features: int,
-        hidden_features: Optional[int] = None,
-        out_features: Optional[int] = None,
-    ):
-        super().__init__()
-        out_features = out_features or in_features
-        hidden_features = hidden_features or in_features
-
-        self.linear_in = nn.Linear(in_features, hidden_features)
-        self.activation = ACT2FN[config.hidden_act]
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.linear_out = nn.Linear(hidden_features, out_features)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.linear_in(hidden_states)
-        hidden_states = self.activation(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.linear_out(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-
-        return hidden_states
 
 
 # Copied from transformers.models.convnext.modeling_convnext.drop_path
@@ -399,7 +350,7 @@ class EfficientFormerV2DropPath(nn.Module):
         return drop_path(hidden_states, self.drop_prob, self.training)
 
 
-class EfficientFormerV2ConvMlp(nn.Module):
+class EfficientFormerV2ConvMLP(nn.Module):
     def __init__(self, config: EfficientFormerV2Config, in_dim: int, hidden_dim: int):
         super().__init__()
         out_dim = in_dim
@@ -439,15 +390,15 @@ class EfficientFormerV2ConvMlp(nn.Module):
 
 class EfficientFormerV2AttentionFFN(nn.Module):
     def __init__(
-        self,  config: EfficientFormerV2Config, dim: int, drop_path_rate: int, resolution=7, stride=None):
+        self,  config: EfficientFormerV2Config, dim: int, drop_path_rate: float, resolution: int, stride: int = None):
         super().__init__()
         self.use_layer_scale = config.use_layer_scale
-        self.token_mixer = Attention4D(dim, resolution=resolution, act_layer=act_layer, stride=stride)
+        self.token_mixer = EfficientFormerV2Attention4D(config=config, dim=dim, resolution=resolution, stride=stride)
 
         mlp_hidden_dim = int(dim * config.mlp_expansion_ratio)
-        self.mlp = EfficientFormerV2ConvMlp(config, in_dim=dim, hidden_dim=mlp_hidden_dim)
+        self.mlp = EfficientFormerV2ConvMLP(config=config, in_dim=dim, hidden_dim=mlp_hidden_dim)
 
-        self.drop_path = EfficientFormerV2DropPath(drop_path_rate) if config.drop_path_rate > 0. else nn.Identity()
+        self.drop_path = EfficientFormerV2DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
         if self.use_layer_scale:
             layer_scale_init_value = config.layer_scale_init_value
             self.layer_scale_1 = nn.Parameter(layer_scale_init_value * torch.ones(dim).unsqueeze(-1).unsqueeze(-1), requires_grad=True)
@@ -460,15 +411,16 @@ class EfficientFormerV2AttentionFFN(nn.Module):
         else:
             hidden_states = hidden_states + self.drop_path(self.token_mixer(hidden_states))
             hidden_states = hidden_states + self.drop_path(self.mlp(hidden_states))
+
         return hidden_states
 
 
 class EfficientFormerV2FFN(nn.Module):
-    def __init__(self, config: EfficientFormerV2Config, dim: int, drop_path_rate: int):
+    def __init__(self, config: EfficientFormerV2Config, dim: int, drop_path_rate: float):
         super().__init__()
         mlp_hidden_dim = int(dim * config.mlp_expansion_ratio)
         self.use_layer_scale = config.use_layer_scale
-        self.mlp = EfficientFormerV2ConvMlp(in_dim=dim, hidden_dim=mlp_hidden_dim)
+        self.mlp = EfficientFormerV2ConvMLP(config=config, in_dim=dim, hidden_dim=mlp_hidden_dim)
         self.drop_path = EfficientFormerV2DropPath(drop_path_rate) if drop_path_rate > 0 else nn.Identity()
         
         if self.use_layer_scale:
@@ -487,31 +439,14 @@ class EfficientFormerV2Block(nn.Module):
         super().__init__()
         blocks = []
         for block_idx in range(layers[index]):
-            block_dpr = drop_path_rate * (
-                    block_idx + sum(layers[:index])) / (sum(layers) - 1)
+            block_drop_path_rate = drop_path_rate * (block_idx + sum(layers[:index])) / (sum(layers) - 1)
             mlp_ratio = e_ratios[str(index)][block_idx]
+
             if index >= 2 and block_idx > layers[index] - 1 - vit_num:
-                if index == 2:
-                    stride = 2
-                else:
-                    stride = None
-                blocks.append(AttnFFN(
-                    dim, mlp_ratio=mlp_ratio,
-                    act_layer=act_layer, norm_layer=norm_layer,
-                    drop=drop_rate, drop_path=block_dpr,
-                    use_layer_scale=use_layer_scale,
-                    layer_scale_init_value=layer_scale_init_value,
-                    resolution=resolution,
-                    stride=stride,
-                ))
+                stride = 2 if index == 2 else None
+                blocks.append(EfficientFormerV2AttentionFFN(config, dim, drop_path=block_drop_path_rate, resolution=resolution, stride=stride))
             else:
-                blocks.append(FFN(
-                    dim, pool_size=pool_size, mlp_ratio=mlp_ratio,
-                    act_layer=act_layer,
-                    drop=drop_rate, drop_path=block_dpr,
-                    use_layer_scale=use_layer_scale,
-                    layer_scale_init_value=layer_scale_init_value,
-                ))
+                blocks.append(EfficientFormerV2FFN(config, dim, drop_path_rate=block_drop_path_rate))
         self.blocks = nn.Sequential(*blocks)
 
     def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor]:
@@ -551,7 +486,6 @@ class EfficientFormerV2Encoder(nn.Module):
                 )
 
         self.intermediate_stages = nn.ModuleList(intermediate_stages)
-        self.last_stage = EfficientFormerV2LastStage(config)
 
     def forward(
         self,

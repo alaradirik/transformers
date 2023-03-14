@@ -51,7 +51,9 @@ class EfficientFormerV2Config(PretrainedConfig):
         expansion_ratios (`List[List(int)]`, *optional*, defaults to `[3, 2, 6, 4]`):
             Ratio of expansion to be used in each layer.
         key_dim (`int`, *optional*, defaults to 32):
-            The size of the key in meta3D block.
+            The size of the key in 4D attention block.
+        downsample_key_dim (`int`, *optional*, defaults to 16):
+            The size of the key in 4D attention downsampling block.
         attention_ratio (`int`, *optional*, defaults to 4):
             Ratio of the dimension of the query and value to the dimension of the key in MSHA block.
         resolution (`int`, *optional*, defaults to 5)
@@ -122,6 +124,7 @@ class EfficientFormerV2Config(PretrainedConfig):
             [4, 4, 4, 3, 3, 3, 3, 4, 4, 4]
         ],
         key_dim: int = 32,
+        downsample_key_dim: int = 16,
         attention_ratio: int = 4,
         resolution: int = 7,
         num_hidden_layers: int = 5,
@@ -160,6 +163,7 @@ class EfficientFormerV2Config(PretrainedConfig):
         self.downsamples = downsamples
         self.dim = dim
         self.key_dim = key_dim
+        self.downsample_key_dim = downsample_key_dim
         self.attention_ratio = attention_ratio
         self.resolution = resolution
         self.pool_size = pool_size
